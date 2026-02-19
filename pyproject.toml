@@ -1,0 +1,17 @@
+[project]
+name = "platform-sdk"
+version = "0.1.0"
+description = "Internal Agent Platform SDK"
+authors = [{ name="BFSI Anlaytics & Insights, Tata Consultancy Services" }]
+dependencies = [
+    "requests",
+    "click",
+    "langchain>=0.1.0"
+]
+
+[project.scripts]
+platform = "platform_sdk.cli:cli"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
