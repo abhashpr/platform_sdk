@@ -1,12 +1,32 @@
 [project]
 name = "platform-sdk"
-version = "0.1.0"
-description = "Internal Agent Platform SDK"
-authors = [{ name="BFSI Anlaytics & Insights, Tata Consultancy Services" }]
+version = "2.1.0"
+description = "Internal Agent Platform SDK - Supports In-Process and Federated modes"
+authors = [{ name="BFSI Analytics & Insights, Tata Consultancy Services" }]
 dependencies = [
     "requests",
     "click",
-    "langchain>=0.1.0"
+    "langchain>=0.1.0",
+    "langchain-core>=0.1.0",
+]
+
+[project.optional-dependencies]
+# For federated/remote mode
+remote = [
+    "httpx>=0.24",
+]
+# For server mode
+server = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.22",
+    "fastmcp>=3.0",
+]
+# Full installation (all features)
+full = [
+    "httpx>=0.24",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.22",
+    "fastmcp>=3.0",
 ]
 
 [project.scripts]

@@ -1,57 +1,68 @@
-# llm.py
-
 import os
 import requests
-# from langchain.llms.base import LLM
+from typing import Any, List, Optional
 from langchain_core.language_models.llms import LLM
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 
 class RouterLLM(LLM):
-
-    def __init__(self, model=None, deployment=None, context=None):
-        self.model = model
-        self.context = context
-        self.deployment = deployment
-        
-        if not self.model and not self.deployment:
-            raise ValueError("Provide either model or deployment for RouterLLM.")
+    """
+    A LangChain-compatible LLM that routes requests to the Platform ModelRouter.
+    This allows developers to use LangGraph/LangChain while the Platform
+    manages the API keys, costs, and model selection.
+    """
+    model: Optional[str] = None
+    deployment: str = "default"
+    temperature: float = 0.2
+    
+    # Hidden attributes to avoid LangChain serialization issues
+    base_url: str = ""
+    token: str = ""
 
     @property
-    def _llm_type(self):
+    def _llm_type(self) -> str:
         return "platform_router"
 
-    def _call(self, prompt, stop=None):
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Internal call logic: Routes to the Lightsail API."""
+        
+        # Priority: Env Var > Passed Config
+        url = self.base_url or os.getenv("PLATFORM_BASE_URL")
+        auth_token = self.token or os.getenv("PLATFORM_API_TOKEN")
 
-        base_url = os.getenv("PLATFORM_BASE_URL")
-        token = os.getenv("PLATFORM_API_TOKEN")
-
-        if not base_url or not token:
+        if not url or not auth_token:
             raise RuntimeError(
-                "Remote Dev Mode required. "
-                "Set PLATFORM_BASE_URL and PLATFORM_API_TOKEN."
+                "Missing Connectivity: Set PLATFORM_BASE_URL and PLATFORM_API_TOKEN."
             )
-            
+
+        # Prepare the payload for the ModelRouter
         payload = {
             "prompt": prompt,
-            "context": self.context.to_dict() if self.context else {}
+            "model": self.model,
+            "deployment": self.deployment,
+            "temperature": self.temperature,
+            "metadata": kwargs.get("metadata", {})
         }
 
-        if self.model:
-            payload["model"] = self.model
-            
-        if self.deployment:
-            payload["deployment"] = self.deployment # Note: deployment is optional and may be used by certain providers like Azure
-        
+        # Call the dedicated 'dev-invoke' endpoint on your Lightsail instance
         response = requests.post(
-            f"{base_url}/api/router/dev-invoke",
-            headers={"Authorization": f"Bearer {token}"},
+            f"{url.rstrip('/')}/api/router/dev-invoke",
+            headers={"Authorization": f"Bearer {auth_token}"},
             json=payload,
             timeout=60,
         )
 
-        response.raise_for_status()
-        return response.json()["output"]
+        if response.status_code != 200:
+            error_msg = response.json().get("detail", "Unknown Router Error")
+            raise RuntimeError(f"ModelRouter Error ({response.status_code}): {error_msg}")
 
-def router_llm(model: str = None, 
-               deployment: str = None, 
-               context = None):
-    return RouterLLM(model=model, deployment=deployment, context=context)
+        return response.json().get("output", "")
+
+def get_llm(model: str = None, deployment: str = "default", **kwargs):
+    """Factory function for developers to easily get a governed LLM."""
+    return RouterLLM(model=model, deployment=deployment, **kwargs)

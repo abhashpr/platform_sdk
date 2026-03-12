@@ -8,7 +8,7 @@ class PlatformClient:
         self.token = os.getenv("PLATFORM_API_TOKEN")
         self.principal_b64 = os.getenv("PLATFORM_API_PRINCIPAL")
         self.principal_name = os.getenv("PLATFORM_API_PRINCIPAL_NAME")
-
+        
         if not self.base_url or not self.token:
             raise RuntimeError(
                 "Set PLATFORM_BASE_URL and PLATFORM_API_TOKEN."
