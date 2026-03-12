@@ -227,26 +227,89 @@ GET /api/models
 
 ---
 
-# 8. Publish to platform
+# 8. Publish to platform (Config-Based Registration)
 
-Once local run works:
+Agents are now registered via `configs/agents.yaml` instead of API calls.
+The SDK generates the YAML snippet for you to add manually.
 
-From inside agent dir:
+### For Code Agents
 
 ```powershell
-platform publish-agent --dir . --name ResearchAgent
+platform publish-agent `
+    --name "Research Agent" `
+    --module code_agents.research_agent `
+    --class-name ResearchAgent `
+    --model gemini-2.5-flash `
+    --description "Performs research tasks"
 ```
 
-Expected:
-
+Output:
 ```
-POST /api/code-agents
+=== Agent Registration ===
+
+Add the following to configs/agents.yaml under 'agents:':
+
+  research_agent:
+    name: Research Agent
+    source: code
+    module: code_agents.research_agent
+    class_name: ResearchAgent
+    description: Performs research tasks
+    model: ${DE_MODEL_RESEARCH_AGENT:-gemini-2.5-flash}
+    temperature: 0.2
+    max_tokens: 2000
+
+To override the model at runtime, set:
+  DE_MODEL_RESEARCH_AGENT=your-model-or-deployment
 ```
 
-Then agent appears in:
+### For Azure/Foundry Deployments
 
-* catalog
-* playground
+```powershell
+platform generate-foundry-config `
+    --name "Foundry SQL Agent" `
+    --agent-id foundry_sql_agent `
+    --description "SQL generation using Azure OpenAI"
+```
+
+Output includes required environment variables for Azure setup.
+
+### Manual Steps
+
+1. Copy the generated YAML to `backend/configs/agents.yaml`
+2. Set required environment variables (see below)
+3. Restart the backend
+
+### Environment Variables for Deployments
+
+```powershell
+# Provider selection
+$env:LLM_PROVIDER="azure_openai"  # or "azure_foundry" or "google_gemini"
+
+# Azure OpenAI
+$env:AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
+$env:AZURE_OPENAI_API_KEY="your-api-key"
+$env:AZURE_OPENAI_DEPLOYMENT="your-deployment-name"
+
+# Azure AI Foundry
+$env:AZURE_FOUNDRY_ENDPOINT="https://your-foundry-endpoint"
+$env:AZURE_FOUNDRY_API_KEY="your-api-key"
+$env:AZURE_FOUNDRY_DEPLOYMENT="your-deployment-name"
+
+# Google Gemini
+$env:GOOGLE_GEMINI_API_KEY="your-api-key"
+
+# Per-agent model overrides
+$env:DE_MODEL_RESEARCH_AGENT="gpt-4-turbo"
+$env:DE_DEFAULT_MODEL="gemini-2.5-flash"
+```
+
+### Why Config-Based?
+
+- **No DB dependencies** for agent definitions
+- **Easy deployment switching** via env vars
+- **Version control friendly** - config in git
+- **Runtime model override** without code changes
 
 ---
 
