@@ -52,17 +52,19 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
     """
     
     def log_message(self, format, *args):
-        """Suppress default HTTP logging."""
-        pass
+        """Log HTTP requests for debugging."""
+        print(f"[Callback Server] {format % args}")
     
     def do_GET(self):
         global _received_data
         
         parsed = urllib.parse.urlparse(self.path)
+        print(f"[Callback Server] GET {parsed.path} with query: {parsed.query[:100]}...")
         
         if parsed.path == "/callback":
             # Parse query parameters
             params = urllib.parse.parse_qs(parsed.query)
+            print(f"[Callback Server] Params keys: {list(params.keys())}")
             
             if "token" in params:
                 # Legacy mode: just the ID token
@@ -72,15 +74,21 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                     "user_pool_id": params.get("user_pool_id", [None])[0],
                     "client_id": params.get("client_id", [None])[0],
                 }
+                print(f"[Callback Server] Received token (length={len(_received_data['id_token'])})")
+                print(f"[Callback Server] Has refresh_token: {_received_data['refresh_token'] is not None}")
                 
                 # Send success page
                 self.send_response(200)
-                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(self._success_page().encode())
+                self.wfile.write(self._success_page().encode('utf-8'))
+                self.wfile.flush()
                 
                 # Signal that auth is complete
+                print("[Callback Server] Setting auth_complete event...")
                 _auth_complete.set()
+                print("[Callback Server] Event set!")
                 
             elif "error" in params:
                 error_msg = params.get("error_description", params["error"])[0]
@@ -313,6 +321,7 @@ def authenticate_with_browser(
     
     # Start the local callback server
     try:
+        socketserver.TCPServer.allow_reuse_address = True
         server = socketserver.TCPServer(("localhost", callback_port), CallbackHandler)
         server.timeout = 1  # Allow periodic checks
     except OSError as e:
@@ -339,12 +348,25 @@ def authenticate_with_browser(
         elapsed = 0
         while elapsed < timeout:
             if _auth_complete.wait(timeout=0.5):
+                print(f"[Auth] Event detected after {elapsed:.1f}s")
                 break
             elapsed += 0.5
+            if elapsed % 10 == 0:
+                print(f"[Auth] Still waiting... ({elapsed:.0f}s elapsed)")
         
-        server.shutdown()
+        print(f"[Auth] Exited wait loop. Event set: {_auth_complete.is_set()}")
+        print(f"[Auth] Received data: {_received_data is not None}")
+        
+        # Don't wait for shutdown - just close the socket
+        print("[Auth] Closing server socket...")
+        try:
+            server.socket.close()
+        except Exception as e:
+            print(f"[Auth] Socket close error (ignored): {e}")
+        print("[Auth] Server socket closed")
         
         if _received_data and _received_data.get("id_token"):
+            print(f"[Auth] Returning success with token length: {len(_received_data['id_token'])}")
             return AuthResult(
                 success=True,
                 token=_received_data["id_token"],
@@ -363,7 +385,10 @@ def authenticate_with_browser(
             )
     except KeyboardInterrupt:
         status("\n❌ Authentication cancelled by user")
-        server.shutdown()
+        try:
+            server.socket.close()
+        except:
+            pass
         return AuthResult(
             success=False,
             error="Authentication cancelled by user"
@@ -372,11 +397,21 @@ def authenticate_with_browser(
 
 def _run_server(server: socketserver.TCPServer, timeout: int):
     """Run the callback server until auth completes or timeout."""
+    print("[Server Thread] Starting server loop")
     start_time = time.time()
     while not _auth_complete.is_set():
-        server.handle_request()
-        if time.time() - start_time > timeout:
+        try:
+            server.handle_request()
+        except Exception as e:
+            print(f"[Server Thread] handle_request error: {e}")
             break
+        if _auth_complete.is_set():
+            print("[Server Thread] Event is set, exiting loop")
+            break
+        if time.time() - start_time > timeout:
+            print("[Server Thread] Timeout reached")
+            break
+    print("[Server Thread] Server loop ended")
 
 
 def get_fresh_token(
