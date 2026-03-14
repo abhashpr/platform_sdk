@@ -30,26 +30,26 @@ except ImportError:
 
 from langchain_core.language_models.llms import LLM
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from pydantic import ConfigDict, PrivateAttr
 
 
 class RemoteRouterLLM(LLM):
     """LangChain-compatible LLM that routes through the DE platform proxy.
     
-    This LLM makes calls to /api/proxy/v1/chat/completions (OpenAI-compatible)
-    or /api/proxy/run endpoints on the DE platform.
+    This LLM makes calls to /api/router/dev-invoke on the DE platform.
+    Uses deployment names ("default", "smart", "fast") instead of model names.
     """
-    model: str = "gpt-4"
+    deployment: str = "default"  # Use deployment tiers, not model names
     temperature: float = 0.2
     max_tokens: int = 2000
     
-    # Platform connection (set via _configure)
-    _platform_url: str = ""
-    _agent_key: str = ""
-    _agent_id: str = ""
-    _run_id: Optional[str] = None
+    # Platform connection (set via _configure) - use PrivateAttr for Pydantic v2
+    _platform_url: str = PrivateAttr(default="")
+    _agent_key: str = PrivateAttr(default="")
+    _agent_id: str = PrivateAttr(default="")
+    _run_id: Optional[str] = PrivateAttr(default=None)
     
-    class Config:
-        underscore_attrs_are_private = True
+    model_config = ConfigDict(extra="allow")
 
     @property
     def _llm_type(self) -> str:
@@ -84,30 +84,31 @@ class RemoteRouterLLM(LLM):
                 "RemoteRouterLLM not configured. Use RemoteAgentContext.get_llm() instead."
             )
         
-        # Build OpenAI-compatible request
-        messages = [{"role": "user", "content": prompt}]
-        
+        # Use the dev-invoke endpoint (same as platform_sdk.llm.RouterLLM)
         payload = {
-            "model": self.model,
-            "messages": messages,
+            "prompt": prompt,
+            "model": None,  # Let the backend resolve from deployment
+            "deployment": self.deployment,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "run_id": self._run_id or str(uuid.uuid4()),
-            "agent_id": self._agent_id,
+            "metadata": {
+                "run_id": self._run_id or str(uuid.uuid4()),
+                "agent_id": self._agent_id,
+            }
         }
         
         headers = {
             "Content-Type": "application/json",
-            "X-DE-AGENT-KEY": self._agent_key,
+            "Authorization": f"Bearer {self._agent_key}",
         }
         
-        url = f"{self._platform_url}/api/proxy/v1/chat/completions"
+        url = f"{self._platform_url}/api/router/dev-invoke"
         
         with httpx.Client(timeout=120.0) as client:
             response = client.post(url, json=payload, headers=headers)
             
             if response.status_code == 401:
-                raise RuntimeError("Invalid X-DE-AGENT-KEY. Check your agent registration.")
+                raise RuntimeError("Invalid agent key. Check your agent registration.")
             elif response.status_code == 400:
                 error_detail = response.json().get("detail", "Bad request")
                 raise RuntimeError(f"Proxy error: {error_detail}")
@@ -115,11 +116,8 @@ class RemoteRouterLLM(LLM):
                 raise RuntimeError(f"Proxy error ({response.status_code}): {response.text}")
             
             data = response.json()
-            # OpenAI-compatible format: extract content from choices
-            choices = data.get("choices", [])
-            if choices and "message" in choices[0]:
-                return choices[0]["message"].get("content", "")
-            return data.get("content", "")
+            # dev-invoke returns {"output": "...", "model": "...", "usage": {...}}
+            return data.get("output", "")
 
 
 class RemoteAgentContext:
@@ -183,7 +181,7 @@ class RemoteAgentContext:
     
     def get_llm(
         self,
-        model: str = "gpt-4",
+        deployment: str = "default",
         temperature: float = 0.2,
         max_tokens: int = 2000,
         **kwargs,
@@ -191,7 +189,7 @@ class RemoteAgentContext:
         """Get a governed LLM that routes through the DE platform proxy.
         
         Args:
-            model: Model name (must be in the platform's allow-list)
+            deployment: Deployment tier ("default", "smart", "fast")
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             
@@ -199,7 +197,7 @@ class RemoteAgentContext:
             A LangChain-compatible LLM instance
         """
         llm = RemoteRouterLLM(
-            model=model,
+            deployment=deployment,
             temperature=temperature,
             max_tokens=max_tokens,
         )

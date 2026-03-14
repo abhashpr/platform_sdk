@@ -29,11 +29,12 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
+from pydantic import BaseModel
+
 try:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse, StreamingResponse
-    from pydantic import BaseModel
     import uvicorn
 except ImportError:
     FastAPI = None

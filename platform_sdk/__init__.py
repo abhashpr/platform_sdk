@@ -36,7 +36,13 @@ Quick Start (Federated):
     
     if __name__ == "__main__":
         serve(mcp, port=8000)
+
+CLI Authentication:
+    $ platform auth --url https://de.example.com
+    $ python your_agent.py
 """
+
+__version__ = "0.2.0"
 
 # Core (In-Process mode)
 from .context import context, AgentContext
@@ -48,6 +54,9 @@ from .remote_context import (
     RemoteRouterLLM,
     get_remote_context,
 )
+
+# Environment utilities
+from .env_utils import update_env_file, get_env_value, env_file_exists
 
 # Server mode
 from .server import (
