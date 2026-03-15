@@ -1,17 +1,37 @@
 import os
 import requests
 
+# Import token manager for auto-refresh support
+try:
+    from .token_manager import get_valid_token
+    _HAS_TOKEN_MANAGER = True
+except ImportError:
+    _HAS_TOKEN_MANAGER = False
+
+
 class PlatformClient:
     
     def __init__(self):
         self.base_url = os.getenv("PLATFORM_BASE_URL")
-        self.token = os.getenv("PLATFORM_API_TOKEN")
         self.principal_b64 = os.getenv("PLATFORM_API_PRINCIPAL")
         self.principal_name = os.getenv("PLATFORM_API_PRINCIPAL_NAME")
         
+        # Token resolution order:
+        # 1. get_valid_token() - reads from ~/.de_platform/config with auto-refresh
+        # 2. PLATFORM_API_TOKEN env var (fallback)
+        self.token = None
+        if _HAS_TOKEN_MANAGER:
+            try:
+                self.token = get_valid_token()
+            except Exception:
+                pass
+        
+        if not self.token:
+            self.token = os.getenv("PLATFORM_API_TOKEN")
+        
         if not self.base_url or not self.token:
             raise RuntimeError(
-                "Set PLATFORM_BASE_URL and PLATFORM_API_TOKEN."
+                "Set PLATFORM_BASE_URL and PLATFORM_API_TOKEN, or run 'platform auth'."
             )
 
     def post(self, path, json=None, files=None):

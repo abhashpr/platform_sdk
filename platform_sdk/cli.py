@@ -1,6 +1,7 @@
 import click
 import json
 import os
+import sys
 import asyncio
 from platform_sdk.runtime import run_local
 from platform_sdk.publisher import register_mcp_agent  # Updated for MCP
@@ -8,6 +9,7 @@ from platform_sdk.client import PlatformClient
 from platform_sdk.env_utils import update_env_file
 from platform_sdk.auth_helper import (
     authenticate_and_update_env,
+    authenticate_and_update_env_oob,
     prompt_for_token,
     AuthResult,
 )
@@ -20,6 +22,40 @@ from platform_sdk.token_manager import (
 from dotenv import load_dotenv
 
 load_dotenv() # This looks for a .env file in the current directory
+
+
+# ASCII-safe emoji replacements for Windows console compatibility
+_EMOJI_MAP = {
+    "📦": "[PACK]",
+    "🚀": "[>>]",
+    "❌": "[X]",
+    "✅": "[OK]",
+    "⚠️": "[!]",
+    "🔗": "[LINK]",
+}
+
+
+def _safe_echo(msg, **kwargs):
+    """Echo with ASCII fallback for Windows console encoding issues."""
+    try:
+        click.echo(msg, **kwargs)
+    except UnicodeEncodeError:
+        # Replace emojis with ASCII equivalents
+        safe_msg = msg
+        for emoji, replacement in _EMOJI_MAP.items():
+            safe_msg = safe_msg.replace(emoji, replacement)
+        click.echo(safe_msg, **kwargs)
+
+
+def _safe_secho(msg, **kwargs):
+    """Styled echo with ASCII fallback."""
+    try:
+        click.secho(msg, **kwargs)
+    except UnicodeEncodeError:
+        safe_msg = msg
+        for emoji, replacement in _EMOJI_MAP.items():
+            safe_msg = safe_msg.replace(emoji, replacement)
+        click.secho(safe_msg, **kwargs)
 
 @click.group()
 def cli():
@@ -45,22 +81,34 @@ def cli():
     help="Manually paste a token instead of browser auth",
 )
 @click.option(
+    "--oob",
+    is_flag=True,
+    help="Out-of-Band mode for enterprise/CloudFront environments",
+)
+@click.option(
     "--port",
     default=9876,
     help="Local port for auth callback (default: 9876)",
 )
-def auth(url, manual, port):
+def auth(url, manual, oob, port):
     """
     Authenticate with the DE Platform and update .env.
 
     Opens your browser to log in, then automatically saves the token
     to your local .env file. Tokens auto-refresh for 30 days.
+    
+    \b
+    Auth Modes:
+      (default)    Browser callback to localhost (fastest)
+      --oob        Out-of-Band code flow (for CloudFront/enterprise)
+      --manual     Paste token from DevTools (fallback)
 
     \b
     Examples:
         platform auth
         platform auth --url https://de.example.com
-        platform auth --manual  # Paste token instead of browser flow
+        platform auth --oob      # For enterprise/CloudFront environments
+        platform auth --manual   # Paste token from browser DevTools
     """
     if not url:
         # Try to get from environment or prompt
@@ -74,7 +122,7 @@ def auth(url, manual, port):
     click.echo()
 
     if manual:
-        # Manual token entry
+        # Manual token entry (DevTools fallback)
         token = prompt_for_token()
         if token:
             update_env_file("PLATFORM_API_TOKEN", token)
@@ -86,8 +134,40 @@ def auth(url, manual, port):
         else:
             click.secho("\n❌ No token provided.", fg="red")
             raise SystemExit(1)
+    
+    elif oob:
+        # Out-of-Band mode for enterprise/CloudFront environments
+        click.secho("   Mode: Out-of-Band (CloudFront-compatible)", fg="blue")
+        click.echo()
+        
+        def on_status(msg: str):
+            click.echo(f"   {msg}")
+
+        result = authenticate_and_update_env_oob(
+            platform_url=url,
+            on_status=on_status,
+        )
+
+        if result.success:
+            click.echo()
+            click.secho("✅ Authentication successful!", fg="green", bold=True)
+            if result.refresh_token:
+                click.echo("   🔄 Auto-refresh enabled (tokens refresh for 30 days)")
+            click.echo()
+            click.echo("   You can now run your agent:")
+            click.secho("   python your_agent.py", fg="cyan")
+        else:
+            click.echo()
+            click.secho(f"❌ Authentication failed: {result.error}", fg="red")
+            click.echo()
+            click.echo("   Troubleshooting:")
+            click.echo("   - Make sure you copied the full authorization code")
+            click.echo("   - Check if the platform URL is correct")
+            click.echo("   - Try: platform auth --manual (paste token directly)")
+            raise SystemExit(1)
+    
     else:
-        # Browser-based authentication
+        # Browser-based authentication with localhost callback
         def on_status(msg: str):
             click.echo(f"   {msg}")
 
@@ -405,7 +485,13 @@ def info():
     help="Extra glob patterns to include (e.g. --include 'lib/*.py'). "
          "agent.py is always included. venv/, __pycache__/, and *.pyc are excluded.",
 )
-def publish(name, version, entry, description, include):
+@click.option(
+    "--all",
+    "include_all",
+    is_flag=True,
+    help="Include all files from the entry directory (respecting skip patterns)",
+)
+def publish(name, version, entry, description, include, include_all):
     """Package and publish a local agent to the DE platform.
 
     Zips the agent file (and any extra --include patterns) and POSTs the
@@ -419,6 +505,7 @@ def publish(name, version, entry, description, include):
 
     Example:
         platform publish --name "LogArchitect" --entry log_architect_remote.py
+        platform publish --name "LogArchitect" --entry log_architect_remote.py --all
     """
     import glob
     import io as _io
@@ -426,7 +513,7 @@ def publish(name, version, entry, description, include):
 
     entry_path = os.path.abspath(entry)
     if not os.path.exists(entry_path):
-        click.secho(f"❌ Entry file not found: {entry_path}", fg="red")
+        _safe_secho(f"❌ Entry file not found: {entry_path}", fg="red")
         raise SystemExit(1)
 
     # ── Gather files ──────────────────────────────────────────────────────────
@@ -442,6 +529,22 @@ def publish(name, version, entry, description, include):
 
     base_dir = os.path.dirname(entry_path)
     skip_dirs = {".venv", "venv", "__pycache__", ".git", "node_modules", ".mypy_cache"}
+    skip_files = {".env", ".gitignore"}  # Don't pack secrets
+
+    # Auto-include all files from directory if --all flag is set
+    if include_all:
+        for root, dirs, files in os.walk(base_dir):
+            # Skip unwanted directories
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for fname in files:
+                if fname in skip_files or fname.endswith(".pyc"):
+                    continue
+                abs_path = os.path.join(root, fname)
+                rel = os.path.relpath(abs_path, base_dir)
+                # Don't add entry file twice
+                if abs_path == entry_path:
+                    continue
+                _add(abs_path, rel.replace("\\", "/"))
 
     for pattern in include:
         for matched in glob.glob(os.path.join(base_dir, pattern), recursive=True):
@@ -456,25 +559,25 @@ def publish(name, version, entry, description, include):
                 continue
             _add(os.path.abspath(matched), rel.replace("\\", "/"))
 
-    click.echo(f"📦 Packing {len(files_to_pack)} file(s)...")
+    _safe_echo(f"📦 Packing {len(files_to_pack)} file(s)...")
     for _, arc in files_to_pack:
-        click.echo(f"   + {arc}")
-
+        _safe_echo(f"   + {arc}")
+    _safe_echo(f"   Entry point: {os.path.basename(entry)}")
     # ── Build zip in memory ───────────────────────────────────────────────────
     buf = _io.BytesIO()
     with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
         for abs_path, arc_name in files_to_pack:
             zf.write(abs_path, arc_name)
     buf.seek(0)
-
+    _safe_echo(f"📦 Created zip archive ({buf.getbuffer().nbytes} bytes)")
     # ── POST to platform ──────────────────────────────────────────────────────
     try:
         client = PlatformClient()
     except RuntimeError as e:
-        click.secho(f"❌ {e}", fg="red")
+        _safe_secho(f"❌ {e}", fg="red")
         raise SystemExit(1)
 
-    click.echo(f"🚀 Publishing '{name}' v{version} to {client.base_url} ...")
+    _safe_echo(f"🚀 Publishing '{name}' v{version} to {client.base_url} ...")
 
     try:
         result = client.post_multipart(
@@ -490,18 +593,18 @@ def publish(name, version, entry, description, include):
             content_type="application/zip",
         )
     except Exception as exc:
-        click.secho(f"❌ Upload failed: {exc}", fg="red")
+        _safe_secho(f"❌ Upload failed: {exc}", fg="red")
         raise SystemExit(1)
 
     agent_id = result.get("id", "unknown")
     base_url = client.base_url.rstrip("/")
 
-    click.secho(f"\n✅ Published '{name}' v{version}!", fg="green", bold=True)
-    click.echo(f"   Agent ID : {agent_id}")
-    click.echo(f"   Status   : {result.get('status', '?')}")
-    click.echo(f"   Agent Key: {result.get('agent_key', '?')}")
-    click.echo(f"\n🔗 Open in My Agents: {base_url}/my-agents")
-    click.echo(
+    _safe_secho(f"\n✅ Published '{name}' v{version}!", fg="green", bold=True)
+    _safe_echo(f"   Agent ID : {agent_id}")
+    _safe_echo(f"   Status   : {result.get('status', '?')}")
+    _safe_echo(f"   Agent Key: {result.get('agent_key', '?')}")
+    _safe_echo(f"\n🔗 Open in My Agents: {base_url}/my-agents")
+    _safe_echo(
         f"\nTo deploy:  curl -X POST {base_url}/api/agents/managed/{agent_id}/deploy"
         f" -H 'Authorization: Bearer $PLATFORM_API_TOKEN'"
     )

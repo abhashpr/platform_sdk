@@ -13,6 +13,7 @@ This is similar to how the AWS CLI and GitHub CLI handle device authentication.
 
 import http.server
 import json
+import os
 import secrets
 import socketserver
 import threading
@@ -575,3 +576,185 @@ def prompt_for_token() -> Optional[str]:
         return None
     except (KeyboardInterrupt, EOFError):
         return None
+
+
+# Out-of-Band (OOB) authentication for enterprise/CloudFront environments
+def authenticate_oob(
+    platform_url: str,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> AuthResult:
+    """
+    Out-of-Band authentication for enterprise environments.
+    
+    This flow is used when localhost callbacks are blocked by:
+    - Corporate firewalls
+    - CloudFront WAF policies
+    - VPN/proxy restrictions
+    
+    Flow:
+    1. Opens browser to platform login with mode=cli_oob
+    2. User logs in and sees an auth code displayed
+    3. User pastes the auth code into the CLI
+    4. CLI exchanges the code for tokens via the platform API
+    
+    Args:
+        platform_url: Base URL of the DE platform
+        on_status: Optional callback for status messages
+    
+    Returns:
+        AuthResult with success/failure and tokens
+    """
+    def status(msg: str):
+        if on_status:
+            on_status(msg)
+    
+    # Generate a unique state for this auth session
+    state = secrets.token_urlsafe(16)
+    
+    # Build the OOB login URL
+    login_url = f"{platform_url.rstrip('/')}/login?mode=cli_oob&state={state}"
+    
+    status("Opening browser for authentication...")
+    status("(CloudFront-compatible OOB mode)")
+    
+    # Open the browser
+    webbrowser.open(login_url)
+    
+    print()
+    print("=" * 50)
+    print("  📋  AUTHORIZATION CODE FLOW")
+    print("=" * 50)
+    print()
+    print("  1. Sign in to the platform in your browser")
+    print("  2. After login, you'll see an Authorization Code")
+    print("  3. Copy and paste the code below")
+    print()
+    print("=" * 50)
+    print()
+    
+    try:
+        auth_code = input("  Enter authorization code: ").strip()
+        
+        if not auth_code:
+            return AuthResult(success=False, error="No authorization code provided")
+        
+        # Exchange the code for tokens via the platform API
+        status("Exchanging authorization code for tokens...")
+        
+        import httpx
+        
+        def try_exchange(url: str) -> tuple:
+            """Try to exchange code at the given URL. Returns (response, error)."""
+            try:
+                exchange_url = f"{url.rstrip('/')}/api/auth/exchange-code"
+                print(f"[OOB] Calling: POST {exchange_url}")
+                
+                response = httpx.post(
+                    exchange_url,
+                    json={
+                        "code": auth_code,
+                        "state": state,
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "PlatformSDK-CLI/1.0",
+                    },
+                    timeout=30.0,
+                )
+                return response, None
+            except httpx.RequestError as e:
+                return None, str(e)
+        
+        # Try primary URL first
+        response, network_error = try_exchange(platform_url)
+        
+        # Auto-detect CloudFront 403 and try direct URL fallback
+        if response and response.status_code == 403:
+            direct_url = os.getenv("PLATFORM_DIRECT_URL")
+            if direct_url:
+                print(f"[OOB] CloudFront blocked (403). Trying direct backend: {direct_url}")
+                status("CloudFront blocked. Trying direct backend...")
+                response, network_error = try_exchange(direct_url)
+            else:
+                print("[OOB] CloudFront blocked (403). Set PLATFORM_DIRECT_URL to bypass.")
+                print("[OOB] Example: PLATFORM_DIRECT_URL=http://3.108.136.233")
+        
+        if network_error:
+            return AuthResult(success=False, error=f"Network error: {network_error}")
+        
+        print(f"[OOB] Response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Prefer access_token for API calls (longer-lived), fallback to id_token
+            return AuthResult(
+                success=True,
+                token=data.get("access_token") or data.get("id_token"),
+                refresh_token=data.get("refresh_token"),
+                expires_in=data.get("expires_in", 3600),
+            )
+        else:
+            # Handle non-JSON error responses gracefully
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("detail") or error_data.get("error") or f"HTTP {response.status_code}"
+            except Exception:
+                # Response isn't JSON - show the raw text
+                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+            return AuthResult(success=False, error=f"Code exchange failed: {error_msg}")
+        
+    except (KeyboardInterrupt, EOFError):
+        return AuthResult(success=False, error="Authentication cancelled by user")
+
+
+def authenticate_and_update_env_oob(
+    platform_url: str,
+    env_key: str = "PLATFORM_API_TOKEN",
+    env_path: Optional[Path] = None,
+    on_status: Optional[Callable[[str], None]] = None,
+) -> AuthResult:
+    """
+    Complete OOB authentication flow: browser + code exchange + storage.
+    
+    This is used by `platform auth --oob` for enterprise/CloudFront environments.
+    """
+    def status(msg: str):
+        if on_status:
+            on_status(msg)
+    
+    # Step 1: OOB authentication
+    result = authenticate_oob(
+        platform_url=platform_url,
+        on_status=on_status,
+    )
+    
+    if not result.success:
+        return result
+    
+    # Step 2: Save tokens
+    status("Saving authentication tokens...")
+    
+    if result.refresh_token:
+        save_tokens(
+            id_token=result.token,
+            refresh_token=result.refresh_token,
+            platform_url=platform_url,
+        )
+        status("✅ Tokens saved with auto-refresh enabled")
+    
+    # Step 3: Update .env
+    try:
+        success = update_env_file(
+            key=env_key,
+            value=result.token,
+            env_path=env_path,
+            create_if_missing=True,
+        )
+        
+        if success:
+            status(f"✅ {env_key} updated in .env")
+            return result
+        else:
+            return AuthResult(success=False, error="Failed to update .env file")
+    except Exception as e:
+        return AuthResult(success=False, error=f"Error updating .env: {e}")

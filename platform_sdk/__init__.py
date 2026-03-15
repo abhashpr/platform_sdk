@@ -58,21 +58,26 @@ from .remote_context import (
 # Environment utilities
 from .env_utils import update_env_file, get_env_value, env_file_exists
 
-# Server mode
-from .server import (
-    ExternalServer,
-    serve,
-    create_server,
-)
+# Server mode (lazy import to avoid loading fastmcp for CLI commands)
+def _lazy_import_server():
+    from .server import (
+        ExternalServer,
+        serve,
+        create_server,
+    )
+    return ExternalServer, serve, create_server
 
-# UI Bridge helpers
-from .ui_bridge import (
-    get_ui_bridge_script,
-    generate_ui_bridge_html,
-    generate_vue_composable,
-    generate_react_hook,
-    save_bridge_assets,
-)
+# UI Bridge helpers (lazy import)
+def _lazy_import_ui_bridge():
+    from .ui_bridge import (
+        get_ui_bridge_script,
+        generate_ui_bridge_html,
+        generate_vue_composable,
+        generate_react_hook,
+        save_bridge_assets,
+    )
+    return (get_ui_bridge_script, generate_ui_bridge_html, 
+            generate_vue_composable, generate_react_hook, save_bridge_assets)
 
 __version__ = "2.1.0-federated"
 
